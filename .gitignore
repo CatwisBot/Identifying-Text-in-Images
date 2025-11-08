@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Output files
+hasil_teks.txt
+hasil_deteksi.jpg
+preprocessing_*.jpg
+
+# Test images (optional - uncomment if you want to ignore test images)
+# *.jpg
+# *.png
+# *.jpeg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
