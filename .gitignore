@@ -13,6 +13,7 @@ ENV/
 hasil_teks.txt
 hasil_deteksi.jpg
 preprocessing_*.jpg
+debug_*.jpg
 
 # Test images (optional - uncomment if you want to ignore test images)
 # *.jpg
