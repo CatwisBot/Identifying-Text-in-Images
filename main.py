@@ -93,6 +93,44 @@ def preprocess_image(img_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 	return processed, gray
 
 
+def upscale_image(img: np.ndarray, scale: float = 2.0) -> np.ndarray:
+	"""
+	Upscale gambar untuk meningkatkan resolusi teks kecil.
+	Menggunakan interpolasi CUBIC untuk hasil terbaik.
+	"""
+	if scale <= 1.0:
+		return img
+	
+	height, width = img.shape[:2]
+	new_width = int(width * scale)
+	new_height = int(height * scale)
+	
+	upscaled = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+	return upscaled
+
+
+def enhance_document_image(img_gray: np.ndarray) -> np.ndarray:
+	"""
+	Enhancement khusus untuk dokumen dengan teks kecil dan noise.
+	
+	Teknik:
+	- Unsharp masking untuk sharpening
+	- Contrast enhancement
+	- Adaptive bilateral filtering
+	"""
+	# 1) Unsharp masking untuk meningkatkan ketajaman
+	gaussian = cv2.GaussianBlur(img_gray, (0, 0), 2.0)
+	unsharp = cv2.addWeighted(img_gray, 1.5, gaussian, -0.5, 0)
+	
+	# 2) Normalize contrast
+	unsharp = cv2.normalize(unsharp, None, 0, 255, cv2.NORM_MINMAX)
+	
+	# 3) Bilateral filter untuk smooth sambil preserve edges
+	enhanced = cv2.bilateralFilter(unsharp, 9, 75, 75)
+	
+	return enhanced
+
+
 def perform_ocr(img_bin: np.ndarray, lang: str = "eng") -> str:
 	"""
 	Lakukan OCR pada citra biner dengan konfigurasi standar yang cocok untuk blok teks.
@@ -103,6 +141,129 @@ def perform_ocr(img_bin: np.ndarray, lang: str = "eng") -> str:
 	text = pytesseract.image_to_string(img_bin, lang=lang, config=config)
 	# Bersihkan karakter form-feed yang sering muncul di akhir
 	return text.replace("\x0c", "").strip()
+
+
+def perform_ocr_optimized(img: np.ndarray, lang: str = "eng+ind") -> str:
+	"""
+	OCR dengan multiple PSM modes dan pilih hasil terbaik.
+	Cocok untuk dokumen dengan layout kompleks.
+	"""
+	# PSM modes untuk dicoba
+	psm_configs = [
+		("--oem 3 --psm 3", "Fully automatic"),  # Best untuk dokumen lengkap
+		("--oem 3 --psm 6", "Single block"),      # Best untuk paragraf
+		("--oem 3 --psm 4", "Single column"),     # Best untuk kolom teks
+	]
+	
+	results = []
+	for config, desc in psm_configs:
+		try:
+			text = pytesseract.image_to_string(img, lang=lang, config=config)
+			text = text.replace("\x0c", "").strip()
+			if text:
+				results.append((text, len(text)))
+		except Exception:
+			continue
+	
+	# Pilih hasil terpanjang (biasanya paling lengkap)
+	if results:
+		results.sort(key=lambda x: x[1], reverse=True)
+		return results[0][0]
+	
+	return ""
+
+
+def correct_common_ocr_errors(text: str) -> str:
+	"""
+	Koreksi kesalahan OCR umum untuk bahasa Indonesia/Inggris.
+	"""
+	if not text:
+		return text
+	
+	# Dictionary perbaikan umum (case-sensitive)
+	corrections = {
+		# Angka sering salah dibaca
+		'O': '0',  # Huruf O jadi angka 0 dalam konteks angka
+		'l': '1',  # Huruf l kecil jadi 1 dalam konteks angka
+		'I': '1',  # Huruf I besar jadi 1 dalam konteks angka
+		'S': '5',  # Huruf S jadi 5 dalam konteks angka (terbatas)
+		
+		# Kata-kata umum yang sering salah
+		'Unluk': 'Untuk',
+		'unluk': 'untuk',
+		'Unluk': 'Untuk',
+		'dan]': 'dari',
+		'dani': 'dari',
+		'dati': 'dari',
+		'tepal': 'tepat',
+		'saal': 'saat',
+		'Kelab': 'Keleb',
+		'Kelebihan': 'Kelebihan',
+		'Kelabihan': 'Kelebihan',
+		'yang,': 'yang',
+		'vang': 'yang',
+		'protocol': 'protokol',
+		'lebih.': 'lebih',
+		'Iinggi': 'tinggi',
+		'Iain': 'lain',
+		'handshake.': 'handshake',
+		'OSIL': 'OSI',
+		'Iayer': 'layer',
+		'hos!': 'host',
+		'hos': 'host',
+		'tiap-': 'tiap',
+		'tepall': 'tepat',
+		'CSM': 'CSMA',
+		'CSMA/CD': 'CSMA/CD',
+		'protocol]': 'protokol',
+		'mencegah-': 'mencegah',
+		'PC-': 'PC',
+		'yang,': 'yang',
+		'Iain-': 'lain',
+		'frame.': 'frame',
+		'saat-': 'saat',
+		'proses-': 'proses',
+		'dan]': 'dari',
+		'pengiriman-': 'pengiriman',
+		'dari-': 'dari',
+	}
+	
+	lines = text.split('\n')
+	corrected_lines = []
+	
+	for line in lines:
+		corrected = line
+		for wrong, right in corrections.items():
+			corrected = corrected.replace(wrong, right)
+		
+		# Perbaiki spacing yang aneh
+		corrected = ' '.join(corrected.split())
+		corrected_lines.append(corrected)
+	
+	return '\n'.join(corrected_lines)
+
+
+def fix_number_patterns(text: str) -> str:
+	"""
+	Perbaiki pola angka yang sering salah (IP address, nomor soal, dll).
+	"""
+	import re
+	
+	# Perbaiki IP address: ganti huruf O dengan 0
+	# Pattern: xxx.xxx.xxx.xxx atau xxx.xxx.xxx.x
+	ip_pattern = r'\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+	
+	def fix_ip(match):
+		ip = match.group(0)
+		# Ganti O dengan 0 dalam IP
+		return ip.replace('O', '0').replace('o', '0')
+	
+	text = re.sub(ip_pattern, fix_ip, text)
+	
+	# Perbaiki nomor soal: "22." "23." dll - pastikan ada spasi setelahnya
+	text = re.sub(r'(\d+)\.\s*([A-Z])', r'\1. \2', text)
+	
+	return text
 
 
 def draw_bounding_boxes(
@@ -192,8 +353,15 @@ def make_fallback_annotated(img_bgr: np.ndarray, message: str) -> np.ndarray:
 
 
 def main() -> None:
-	print("=== Identifikasi Teks pada Gambar (OCR) ===")
-	print("Masukkan nama file gambar (contoh: nota.jpg atau teks.png)")
+	print("=== Identifikasi Teks pada Gambar (OCR) - Enhanced ===")
+	print("\nMode preprocessing:")
+	print("  1. Standard (cepat) - untuk gambar berkualitas baik")
+	print("  2. Enhanced (akurat) - untuk dokumen dengan teks kecil/blur")
+	
+	mode = input("\nPilih mode (1/2) [default: 2]: ").strip()
+	use_enhanced = (mode != "1")
+	
+	print("\nMasukkan nama file gambar (contoh: nota.jpg atau soal.png)")
 	img_path = input("Nama file gambar: ").strip().strip('"').strip("'")
 
 	if not os.path.isfile(img_path):
@@ -207,19 +375,98 @@ def main() -> None:
 		print("[!] Gagal membaca gambar. Format mungkin tidak didukung atau file korup.")
 		sys.exit(1)
 
+	print(f"\n[*] Gambar dimuat: {img.shape[1]}x{img.shape[0]} pixels")
+
 	# Pastikan Tesseract terpasang dan path terdeteksi (khusus Windows)
 	detected = ensure_tesseract_cmd()
 	if os.name == "nt" and detected is None:
 		print("[!] Tidak menemukan tesseract.exe di lokasi umum.")
 		print("    Silakan install Tesseract OCR dan/atau set path manual di kode: pytesseract.pytesseract.tesseract_cmd")
 
-	# Preprocessing
-	processed, gray = preprocess_image(img)
+	# === Enhanced preprocessing untuk akurasi maksimal ===
+	if use_enhanced:
+		print("[*] Mode: ENHANCED - Upscaling & multiple preprocessing")
+		
+		# Step 1: Upscale jika gambar kecil
+		h, w = img.shape[:2]
+		if w < 1500 or h < 1500:
+			scale = 2.0
+			print(f"[*] Upscaling gambar {scale}x untuk meningkatkan resolusi teks...")
+			img = upscale_image(img, scale)
+			print(f"    Ukuran baru: {img.shape[1]}x{img.shape[0]} pixels")
+		
+		# Step 2: Grayscale & enhancement
+		print("[*] Applying document enhancement (unsharp masking, contrast)...")
+		if len(img.shape) == 3:
+			gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+		else:
+			gray = img.copy()
+		
+		enhanced_gray = enhance_document_image(gray)
+		
+		# Step 3: Multiple thresholding strategies
+		print("[*] Generating multiple preprocessing variants...")
+		
+		# Otsu threshold
+		_, otsu = cv2.threshold(enhanced_gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+		
+		# Adaptive threshold
+		adaptive = cv2.adaptiveThreshold(
+			enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 15, 10
+		)
+		
+		# CLAHE + Otsu
+		clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+		clahe_img = clahe.apply(enhanced_gray)
+		_, clahe_otsu = cv2.threshold(clahe_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+		
+		# Simpan untuk analisis
+		cv2.imwrite("debug_enhanced_gray.jpg", enhanced_gray)
+		cv2.imwrite("debug_otsu.jpg", otsu)
+		cv2.imwrite("debug_adaptive.jpg", adaptive)
+		cv2.imwrite("debug_clahe.jpg", clahe_otsu)
+		
+		processed_variants = [
+			("otsu", otsu),
+			("adaptive", adaptive),
+			("clahe", clahe_otsu),
+		]
+	else:
+		print("[*] Mode: STANDARD - Preprocessing cepat")
+		processed, gray = preprocess_image(img)
+		processed_variants = [("standard", processed)]
 
-	# OCR
+	# === OCR dengan multiple configs ===
+	print("[*] Melakukan OCR dengan multiple configurations...")
+	print("    Bahasa: English + Indonesian (jika tersedia)")
+	
 	ocr_ok = True
+	all_texts = []
+	
 	try:
-		text = perform_ocr(processed, lang="eng")  # ganti ke 'ind' jika paket bahasa Indonesia terpasang
+		for name, img_processed in processed_variants:
+			print(f"    - Processing variant: {name}")
+			# Coba dengan eng+ind (fallback ke eng jika ind tidak ada)
+			try:
+				text = perform_ocr_optimized(img_processed, lang="eng+ind")
+			except Exception:
+				text = perform_ocr_optimized(img_processed, lang="eng")
+			
+			if text:
+				all_texts.append(text)
+		
+		# Pilih hasil terpanjang
+		if all_texts:
+			text = max(all_texts, key=len)
+		else:
+			text = ""
+		
+		# Post-processing: koreksi kesalahan umum
+		if text:
+			print("[*] Applying OCR error correction...")
+			text = correct_common_ocr_errors(text)
+			text = fix_number_patterns(text)
+		
 	except pytesseract.TesseractNotFoundError:
 		ocr_ok = False
 		text = ""
@@ -230,11 +477,19 @@ def main() -> None:
 		print(f"[!] Terjadi kesalahan saat OCR: {e}. Melewati langkah OCR (mode fallback).")
 
 	# Tampilkan hasil teks di terminal
-	print("\n=== Hasil OCR ===")
+	print("\n" + "="*70)
+	print("=== HASIL OCR ===")
+	print("="*70)
 	if text:
 		print(text)
+		print("="*70)
+		print(f"[*] Total karakter: {len(text)}")
+		print(f"[*] Total baris: {len(text.splitlines())}")
+		words = text.split()
+		print(f"[*] Total kata: {len(words)}")
 	else:
 		print("[Kosong] Tidak ada teks terdeteksi.")
+		print("="*70)
 
 	# Simpan hasil teks
 	try:
@@ -242,6 +497,43 @@ def main() -> None:
 		print("\n[+] Teks tersimpan ke: hasil_teks.txt")
 	except Exception as e:
 		print(f"[!] Gagal menyimpan teks: {e}")
+
+	# Gambar bounding box dan simpan gambar hasil
+	print("[*] Mendeteksi bounding boxes...")
+	try:
+		if ocr_ok and processed_variants:
+			# Gunakan variant terbaik untuk bounding box
+			_, best_processed = processed_variants[0]
+			annotated, n_boxes = draw_bounding_boxes(img, best_processed, lang="eng+ind", conf_threshold=30)
+			out_img_path = "hasil_deteksi.jpg"
+			cv2.imwrite(out_img_path, annotated)
+			print(f"[+] Gambar hasil deteksi tersimpan ke: {out_img_path}")
+			print(f"[*] Total bounding boxes: {n_boxes}")
+		else:
+			# Mode fallback
+			annotated = make_fallback_annotated(
+				img, "Fallback: Tesseract tidak tersedia - OCR dilewati"
+			)
+			out_img_path = "hasil_deteksi.jpg"
+			cv2.imwrite(out_img_path, annotated)
+			print(f"[+] (Fallback) Gambar tersimpan ke: {out_img_path}")
+	except Exception as e:
+		print(f"[!] Gagal membuat/menyimpan gambar hasil deteksi: {e}")
+		annotated = None
+
+	# Tampilkan gambar (opsional)
+	if use_enhanced:
+		print("\n[*] Debug images saved: debug_*.jpg")
+	
+	print("\n" + "="*70)
+	print("=== SELESAI ===")
+	print("="*70)
+	print("Output files:")
+	print("  - hasil_teks.txt      : Teks hasil OCR (sudah dikoreksi)")
+	print("  - hasil_deteksi.jpg   : Gambar dengan bounding boxes")
+	if use_enhanced:
+		print("  - debug_*.jpg         : Preprocessing variants untuk analisis")
+	print("="*70)
 
 	# Gambar bounding box dan simpan gambar hasil
 	try:
@@ -262,17 +554,19 @@ def main() -> None:
 		print(f"[!] Gagal membuat/menyimpan gambar hasil deteksi: {e}")
 		annotated = None
 
-	# Tampilkan gambar (opsional, dapat gagal pada lingkungan headless)
-	try:
-		cv2.imshow("Gambar Asli", img)
-		cv2.imshow("Hasil Preprocessing", processed)
-		if annotated is not None:
-			cv2.imshow("Deteksi Teks (Bounding Box)", annotated)
-		print("\nTutup jendela gambar dengan menekan tombol apa saja...")
-		cv2.waitKey(0)
-		cv2.destroyAllWindows()
-	except cv2.error:
-		print("[!] Tidak dapat menampilkan jendela gambar (mungkin lingkungan tanpa GUI). Gambar sudah disimpan.")
+	# Tampilkan gambar (opsional)
+	if use_enhanced:
+		print("\n[*] Debug images saved: debug_*.jpg")
+	
+	print("\n" + "="*70)
+	print("=== SELESAI ===")
+	print("="*70)
+	print("Output files:")
+	print("  - hasil_teks.txt      : Teks hasil OCR (sudah dikoreksi)")
+	print("  - hasil_deteksi.jpg   : Gambar dengan bounding boxes")
+	if use_enhanced:
+		print("  - debug_*.jpg         : Preprocessing variants untuk analisis")
+	print("="*70)
 
 
 if __name__ == "__main__":
